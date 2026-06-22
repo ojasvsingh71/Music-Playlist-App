@@ -3,6 +3,10 @@ import 'package:flutter/material.dart';
 import 'dart:ui';
 import 'dart:math' as math;
 import 'dart:async';
+import 'services/audio_player_service.dart';
+import 'services/local_music_scanner_service.dart';
+import 'package:on_audio_query/on_audio_query.dart' show QueryArtworkWidget, ArtworkType;
+import 'package:just_audio/just_audio.dart' show LoopMode;
 
 void main() {
   runApp(const MusicPlaylistApp());
@@ -80,6 +84,8 @@ class Song {
   final Color color;
   final String mood;
   final List<LyricLine> lyrics;
+  final String? uri;
+  final bool isLocal;
 
   const Song({
     required this.id,
@@ -94,6 +100,8 @@ class Song {
     required this.color,
     required this.mood,
     required this.lyrics,
+    this.uri,
+    this.isLocal = false,
   });
 }
 
@@ -151,7 +159,21 @@ class _AppShellState extends State<AppShell> {
   final List<String> _recentHistory = [];
   String _genreFilter = 'All';
 
-  static const List<Song> _songs = [
+  // Audio query & playback additions
+  List<Song> _songs = [];
+  bool _isLoadingLocalSongs = false;
+  
+  StreamSubscription? _playerStateSubscription;
+  StreamSubscription? _positionSubscription;
+  StreamSubscription? _durationSubscription;
+  StreamSubscription? _sequenceSubscription;
+  StreamSubscription? _shuffleSubscription;
+  StreamSubscription? _loopSubscription;
+
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+
+  static const List<Song> _mockSongs = [
     Song(
       id: 's1',
       title: 'Kesariya',
@@ -304,6 +326,7 @@ class _AppShellState extends State<AppShell> {
   @override
   void initState() {
     super.initState();
+    _songs = List.from(_mockSongs);
     _playlists = [
       Playlist(
         id: 'p1',
@@ -335,15 +358,95 @@ class _AppShellState extends State<AppShell> {
         isPublic: true,
       ),
     ];
+    _initAudioAndScan();
   }
 
   @override
   void dispose() {
+    _playerStateSubscription?.cancel();
+    _positionSubscription?.cancel();
+    _durationSubscription?.cancel();
+    _sequenceSubscription?.cancel();
+    _shuffleSubscription?.cancel();
+    _loopSubscription?.cancel();
     _songSearch.dispose();
     _playlistSearch.dispose();
     _newPlaylistName.dispose();
     _newPlaylistDescription.dispose();
     super.dispose();
+  }
+
+  Future<void> _initAudioAndScan() async {
+    await AudioPlayerService.instance.init();
+    _setupPlayerListeners();
+
+    setState(() => _isLoadingLocalSongs = true);
+    final localSongs = await LocalMusicScannerService.instance.scanLocalMusic();
+    setState(() {
+      if (localSongs.isNotEmpty) {
+        _songs = [...localSongs, ..._mockSongs];
+      } else {
+        _songs = List.from(_mockSongs);
+      }
+      _isLoadingLocalSongs = false;
+    });
+
+    if (_songs.isNotEmpty) {
+      await AudioPlayerService.instance.loadPlaylist(_songs, _currentSongIndex);
+    }
+  }
+
+  void _setupPlayerListeners() {
+    _playerStateSubscription = AudioPlayerService.instance.playerStateStream.listen((state) {
+      setState(() {
+        _playing = state.playing;
+      });
+    });
+
+    _positionSubscription = AudioPlayerService.instance.positionStream.listen((pos) {
+      setState(() {
+        _position = pos;
+      });
+    });
+
+    _durationSubscription = AudioPlayerService.instance.durationStream.listen((dur) {
+      setState(() {
+        _duration = dur ?? Duration.zero;
+      });
+    });
+
+    _sequenceSubscription = AudioPlayerService.instance.sequenceStateStream.listen((seq) {
+      if (seq != null) {
+        final currentTag = seq.currentSource?.tag;
+        if (currentTag is Song) {
+          final idx = _songs.indexWhere((s) => s.id == currentTag.id);
+          if (idx != -1 && idx != _currentSongIndex) {
+            setState(() {
+              _currentSongIndex = idx;
+              _recentHistory.insert(0, currentTag.title);
+              if (_recentHistory.length > 10) _recentHistory.removeLast();
+            });
+            widget.onThemeChanged(currentTag.color);
+          }
+        }
+      }
+    });
+
+    _shuffleSubscription = AudioPlayerService.instance.shuffleModeEnabledStream.listen((shuffled) {
+      setState(() => _shuffle = shuffled);
+    });
+
+    _loopSubscription = AudioPlayerService.instance.loopModeStream.listen((loopMode) {
+      setState(() => _loop = loopMode == LoopMode.one);
+    });
+  }
+
+  Future<void> _playSong(Song song, List<Song> queue) async {
+    final indexInQueue = queue.indexWhere((s) => s.id == song.id);
+    if (indexInQueue != -1) {
+      await AudioPlayerService.instance.loadPlaylist(queue, indexInQueue);
+      await AudioPlayerService.instance.play();
+    }
   }
 
   Song get _currentSong => _songs[_currentSongIndex % _songs.length];
@@ -573,14 +676,26 @@ class _AppShellState extends State<AppShell> {
         children: [
           Hero(
             tag: 'hero_${song.id}',
-            child: Container(
-              width: 88,
-              height: 88,
-              decoration: BoxDecoration(
-                color: Colors.white24,
-                borderRadius: BorderRadius.circular(24),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: Container(
+                width: 88,
+                height: 88,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                child: song.isLocal
+                    ? QueryArtworkWidget(
+                        id: int.parse(song.id),
+                        type: ArtworkType.AUDIO,
+                        artworkWidth: 88,
+                        artworkHeight: 88,
+                        artworkFit: BoxFit.cover,
+                        nullArtworkWidget: Icon(song.icon, size: 46, color: Colors.white),
+                      )
+                    : Icon(song.icon, size: 46, color: Colors.white),
               ),
-              child: Icon(song.icon, size: 46, color: Colors.white),
             ),
           ),
           const SizedBox(width: 16),
@@ -604,7 +719,9 @@ class _AppShellState extends State<AppShell> {
                 ),
                 const SizedBox(height: 12),
                 LinearProgressIndicator(
-                  value: _playing ? 0.72 : 0.28,
+                  value: _duration.inMilliseconds > 0
+                      ? _position.inMilliseconds / _duration.inMilliseconds
+                      : 0.0,
                   minHeight: 6,
                   borderRadius: BorderRadius.circular(99),
                 ),
@@ -682,12 +799,14 @@ class _AppShellState extends State<AppShell> {
         ),
         const SizedBox(height: 8),
         Expanded(
-          child: songs.isEmpty
-              ? const _EmptyState(
-                  icon: Icons.search_off,
-                  title: 'No matching songs',
-                  subtitle: 'Try another search or filter.',
-                )
+          child: _isLoadingLocalSongs
+              ? const Center(child: CircularProgressIndicator())
+              : songs.isEmpty
+                  ? const _EmptyState(
+                      icon: Icons.search_off,
+                      title: 'No matching songs',
+                      subtitle: 'Try another search or filter.',
+                    )
               : ListView.builder(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
                   itemCount: songs.length,
@@ -703,10 +822,9 @@ class _AppShellState extends State<AppShell> {
                         isDownloaded: isDownloaded,
                         compact: false,
                         onTap: () {
-                          _setCurrentSong(_songs.indexWhere((s) => s.id == song.id));
+                          _playSong(song, songs);
                           setState(() {
                             _index = 3;
-                            _playing = true;
                           });
                         },
                         onFavoriteToggle: () => setState(() {
@@ -805,8 +923,22 @@ class _AppShellState extends State<AppShell> {
         _NowPlayingCard(
           song: current,
           isPlaying: _playing,
-          progress: _playing ? 0.64 : 0.16,
-          onPlayPause: () => setState(() => _playing = !_playing),
+          progress: _duration.inMilliseconds > 0
+              ? _position.inMilliseconds / _duration.inMilliseconds
+              : 0.0,
+          position: _position,
+          duration: _duration,
+          onSeek: (val) {
+            final targetMs = (val * _duration.inMilliseconds).toInt();
+            AudioPlayerService.instance.seek(Duration(milliseconds: targetMs));
+          },
+          onPlayPause: () {
+            if (_playing) {
+              AudioPlayerService.instance.pause();
+            } else {
+              AudioPlayerService.instance.play();
+            }
+          },
           onNext: _nextSong,
           onPrevious: _previousSong,
         ),
@@ -818,15 +950,29 @@ class _AppShellState extends State<AppShell> {
           onAction: () => _showAudioSettings(context),
         ),
         const SizedBox(height: 12),
-        LyricsView(song: current, progress: _playing ? 0.64 : 0.16),
+        LyricsView(
+          song: current,
+          progress: _duration.inMilliseconds > 0
+              ? _position.inMilliseconds / _duration.inMilliseconds
+              : 0.0,
+        ),
         const SizedBox(height: 16),
         _ControlPanel(
           isShuffled: _shuffle,
           isLooping: _loop,
           volume: _volume,
-          onShuffle: () => setState(() => _shuffle = !_shuffle),
-          onLoop: () => setState(() => _loop = !_loop),
-          onVolumeChanged: (value) => setState(() => _volume = value),
+          onShuffle: () {
+            final nextShuffle = !_shuffle;
+            AudioPlayerService.instance.toggleShuffle(nextShuffle);
+          },
+          onLoop: () {
+            final nextLoop = !_loop;
+            AudioPlayerService.instance.setLoopMode(nextLoop);
+          },
+          onVolumeChanged: (value) {
+            setState(() => _volume = value);
+            AudioPlayerService.instance.setVolume(value);
+          },
         ),
         const SizedBox(height: 16),
         _SectionHeader(
@@ -1004,18 +1150,30 @@ class _AppShellState extends State<AppShell> {
                     children: [
                       Hero(
                         tag: 'mini_hero_${song.id}',
-                        child: Container(
-                          width: 48,
-                          height: 48,
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [song.color, song.color.withOpacity(0.6)],
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(14),
+                          child: Container(
+                            width: 48,
+                            height: 48,
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [song.color, song.color.withOpacity(0.6)],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ),
+                              borderRadius: BorderRadius.circular(14),
                             ),
-                            borderRadius: BorderRadius.circular(14),
+                            child: song.isLocal
+                                ? QueryArtworkWidget(
+                                    id: int.parse(song.id),
+                                    type: ArtworkType.AUDIO,
+                                    artworkWidth: 48,
+                                    artworkHeight: 48,
+                                    artworkFit: BoxFit.cover,
+                                    nullArtworkWidget: Icon(song.icon, color: Colors.white, size: 24),
+                                  )
+                                : Icon(song.icon, color: Colors.white, size: 24),
                           ),
-                          child: Icon(song.icon, color: Colors.white, size: 24),
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -1040,7 +1198,13 @@ class _AppShellState extends State<AppShell> {
                         ),
                       ),
                       IconButton(
-                        onPressed: () => setState(() => _playing = !_playing),
+                        onPressed: () {
+                          if (_playing) {
+                            AudioPlayerService.instance.pause();
+                          } else {
+                            AudioPlayerService.instance.play();
+                          }
+                        },
                         icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
                       ),
                       IconButton(
@@ -1055,7 +1219,9 @@ class _AppShellState extends State<AppShell> {
                   left: 0,
                   right: 0,
                   child: LinearProgressIndicator(
-                    value: _playing ? 0.6 : 0.2,
+                    value: _duration.inMilliseconds > 0
+                        ? _position.inMilliseconds / _duration.inMilliseconds
+                        : 0.0,
                     minHeight: 2.5,
                     backgroundColor: Colors.transparent,
                     valueColor: AlwaysStoppedAnimation<Color>(song.color),
@@ -1156,10 +1322,9 @@ class _AppShellState extends State<AppShell> {
                           compact: true,
                           onTap: () {
                             Navigator.pop(context);
+                            _playSong(song, filtered);
                             setState(() {
-                              _currentSongIndex = _songs.indexWhere((s) => s.id == song.id);
                               _index = 3;
-                              _playing = true;
                             });
                           },
                           onFavoriteToggle: () {},
@@ -1372,10 +1537,9 @@ class _AppShellState extends State<AppShell> {
                         isCurrent: song.id == _currentSong.id,
                         onTap: () {
                           Navigator.pop(context);
+                          _playSong(song, playlistSongs);
                           setState(() {
-                            _currentSongIndex = _songs.indexWhere((s) => s.id == song.id);
                             _index = 3;
-                            _playing = true;
                           });
                         },
                       ),
@@ -1848,14 +2012,26 @@ class _SongCard extends StatelessWidget {
             children: [
               Hero(
                 tag: 'hero_${song.id}',
-                child: Container(
-                  width: compact ? 54 : 66,
-                  height: compact ? 54 : 66,
-                  decoration: BoxDecoration(
-                    color: song.color.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(18),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(18),
+                  child: Container(
+                    width: compact ? 54 : 66,
+                    height: compact ? 54 : 66,
+                    decoration: BoxDecoration(
+                      color: song.color.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: song.isLocal
+                        ? QueryArtworkWidget(
+                            id: int.parse(song.id),
+                            type: ArtworkType.AUDIO,
+                            artworkWidth: compact ? 54 : 66,
+                            artworkHeight: compact ? 54 : 66,
+                            artworkFit: BoxFit.cover,
+                            nullArtworkWidget: Icon(song.icon, color: song.color),
+                          )
+                        : Icon(song.icon, color: song.color),
                   ),
-                  child: Icon(song.icon, color: song.color),
                 ),
               ),
               const SizedBox(width: 14),
@@ -2019,6 +2195,9 @@ class _NowPlayingCard extends StatelessWidget {
   final VoidCallback onPlayPause;
   final VoidCallback onNext;
   final VoidCallback onPrevious;
+  final Duration position;
+  final Duration duration;
+  final ValueChanged<double>? onSeek;
 
   const _NowPlayingCard({
     required this.song,
@@ -2027,6 +2206,9 @@ class _NowPlayingCard extends StatelessWidget {
     required this.onPlayPause,
     required this.onNext,
     required this.onPrevious,
+    required this.position,
+    required this.duration,
+    required this.onSeek,
   });
 
   @override
@@ -2060,27 +2242,41 @@ class _NowPlayingCard extends StatelessWidget {
               const SizedBox(height: 20),
               Hero(
                 tag: 'hero_${song.id}',
-                child: Container(
-                  width: 200,
-                  height: 200,
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: [song.color, song.color.withOpacity(0.7)],
-                    ),
-                    borderRadius: BorderRadius.circular(40),
-                    boxShadow: [
-                      BoxShadow(
-                        color: song.color.withOpacity(0.4),
-                        blurRadius: 20,
-                        spreadRadius: 2,
-                        offset: const Offset(0, 10),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(40),
+                  child: Container(
+                    width: 200,
+                    height: 200,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [song.color, song.color.withOpacity(0.7)],
                       ),
-                    ],
-                  ),
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      Icon(song.icon, size: 90, color: Colors.white),
+                      borderRadius: BorderRadius.circular(40),
+                      boxShadow: [
+                        BoxShadow(
+                          color: song.color.withOpacity(0.4),
+                          blurRadius: 20,
+                          spreadRadius: 2,
+                          offset: const Offset(0, 10),
+                        ),
+                      ],
+                    ),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        if (song.isLocal)
+                          Positioned.fill(
+                            child: QueryArtworkWidget(
+                              id: int.parse(song.id),
+                              type: ArtworkType.AUDIO,
+                              artworkWidth: 200,
+                              artworkHeight: 200,
+                              artworkFit: BoxFit.cover,
+                              nullArtworkWidget: Icon(song.icon, size: 90, color: Colors.white),
+                            ),
+                          )
+                        else
+                          Icon(song.icon, size: 90, color: Colors.white),
                       if (isPlaying)
                         Positioned(
                           bottom: 20,
@@ -2094,6 +2290,7 @@ class _NowPlayingCard extends StatelessWidget {
                   ),
                 ),
               ),
+            ),
               const SizedBox(height: 24),
               Text(
                 song.title,
@@ -2106,19 +2303,18 @@ class _NowPlayingCard extends StatelessWidget {
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey[600]),
               ),
               const SizedBox(height: 24),
-              LinearProgressIndicator(
-                value: progress,
-                minHeight: 10,
-                borderRadius: BorderRadius.circular(99),
-                backgroundColor: song.color.withOpacity(0.1),
-                valueColor: AlwaysStoppedAnimation<Color>(song.color),
+              Slider(
+                value: progress.clamp(0.0, 1.0),
+                onChanged: onSeek,
+                activeColor: song.color,
+                inactiveColor: song.color.withOpacity(0.15),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 4),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text('1:24', style: TextStyle(fontWeight: FontWeight.w600, color: song.color)),
-                  Text(_durationText(song.duration), style: const TextStyle(fontWeight: FontWeight.w600)),
+                  Text(_durationText(position), style: TextStyle(fontWeight: FontWeight.w600, color: song.color)),
+                  Text(_durationText(duration), style: const TextStyle(fontWeight: FontWeight.w600)),
                 ],
               ),
               const SizedBox(height: 24),
