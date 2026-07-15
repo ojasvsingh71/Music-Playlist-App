@@ -1,5 +1,5 @@
 import 'package:just_audio/just_audio.dart';
-import '../main.dart'; // To reference the Song model
+import '../models/song.dart';
 
 class AudioPlayerService {
   // Singleton Pattern
@@ -118,8 +118,8 @@ class AudioPlayerService {
   Future<void> next() async {
     if (_player.hasNext) {
       await _player.seekToNext();
-    } else if (_player.loopMode == LoopMode.all && _currentPlaylist.isNotEmpty) {
-      // If we are looping the playlist and reached the end, go back to first song
+    } else if (_currentPlaylist.isNotEmpty) {
+      // Manual skip wraps around to the beginning
       await _player.seek(Duration.zero, index: 0);
     }
   }
@@ -131,8 +131,8 @@ class AudioPlayerService {
       await _player.seek(Duration.zero);
     } else if (_player.hasPrevious) {
       await _player.seekToPrevious();
-    } else if (_player.loopMode == LoopMode.all && _currentPlaylist.isNotEmpty) {
-      // Wrap around to the end of the playlist
+    } else if (_currentPlaylist.isNotEmpty) {
+      // Manual skip wraps around to the end
       await _player.seek(Duration.zero, index: _currentPlaylist.length - 1);
     }
   }

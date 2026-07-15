@@ -2,7 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:on_audio_query/on_audio_query.dart';
 import 'package:permission_handler/permission_handler.dart';
-import '../main.dart'; // To reference the Song model
+import '../models/song.dart';
 
 class LocalMusicScannerService {
   // Singleton Pattern
@@ -58,11 +58,45 @@ class LocalMusicScannerService {
         ignoreCase: true,
       );
 
-      // Filter out notifications, ringtones, or files under 10 seconds
+      // Filter out voice notes, call recordings, app files, or files under 30 seconds
       final playableSongs = localSongs.where((song) {
-        final isMusic = song.isMusic ?? true;
+        // Exclude tracks shorter than 30 seconds (standard for songs)
         final duration = song.duration ?? 0;
-        return isMusic && duration >= 10000;
+        if (duration < 30000) return false;
+
+        // Exclude typical voice recording / WhatsApp prefix patterns
+        final name = (song.displayName).toUpperCase();
+        if (name.startsWith("AUD-") || 
+            name.startsWith("PTT-") || 
+            name.startsWith("REC-") || 
+            name.startsWith("VOICE-")) {
+          return false;
+        }
+
+        // Exclude non-music paths (WhatsApp, Telegram, Call recorders, App caches, System audio)
+        final path = (song.data).toLowerCase();
+        final excludedKeywords = [
+          "whatsapp",
+          "telegram",
+          "recorder",
+          "recording",
+          "voice_memo",
+          "voicememo",
+          "call_rec",
+          "callrec",
+          "android/data",
+          "notifications",
+          "ringtones",
+          "alarms",
+          "podcasts"
+        ];
+        for (final keyword in excludedKeywords) {
+          if (path.contains(keyword)) {
+            return false;
+          }
+        }
+
+        return true;
       }).toList();
 
       // Map to our custom Song model
@@ -87,6 +121,7 @@ class LocalMusicScannerService {
           mood: 'Local',
           lyrics: [],
           uri: songModel.uri,
+          path: songModel.data,
           isLocal: true,
         );
       }).toList();
