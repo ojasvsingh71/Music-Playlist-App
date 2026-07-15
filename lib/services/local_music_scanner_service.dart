@@ -1,8 +1,8 @@
 import 'dart:io';
-import 'package:flutter/material.dart';
 import 'package:on_audio_query/on_audio_query.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../models/song.dart';
+import 'song_classifier.dart';
 
 class LocalMusicScannerService {
   // Singleton Pattern
@@ -99,26 +99,40 @@ class LocalMusicScannerService {
         return true;
       }).toList();
 
-      // Map to our custom Song model
+      // Map to our custom Song model using the auto classifier
       return playableSongs.map((songModel) {
+        final title = songModel.title;
+        final artist = (songModel.artist == '<unknown>' || songModel.artist == null)
+            ? 'Unknown Artist'
+            : songModel.artist!;
+        final album = (songModel.album == '<unknown>' || songModel.album == null)
+            ? 'Unknown Album'
+            : songModel.album!;
+        final duration = Duration(milliseconds: songModel.duration ?? 0);
+        final nativeGenre = (songModel.genre == '<unknown>' || songModel.genre == null)
+            ? null
+            : songModel.genre;
+
+        final classification = SongClassifier.classify(
+          title: title,
+          artist: artist,
+          album: album,
+          nativeGenre: nativeGenre,
+          duration: duration,
+        );
+
         return Song(
           id: songModel.id.toString(),
-          title: songModel.title,
-          artist: (songModel.artist == '<unknown>' || songModel.artist == null) 
-              ? 'Unknown Artist' 
-              : songModel.artist!,
-          album: (songModel.album == '<unknown>' || songModel.album == null) 
-              ? 'Unknown Album' 
-              : songModel.album!,
-          duration: Duration(milliseconds: songModel.duration ?? 0),
-          genre: (songModel.genre == '<unknown>' || songModel.genre == null) 
-              ? 'Local Audio' 
-              : songModel.genre!,
+          title: title,
+          artist: artist,
+          album: album,
+          duration: duration,
+          genre: classification.genre,
           year: DateTime.now().year,
           rating: 0.0, // default rating for local files
-          icon: Icons.music_note,
-          color: _generateColorForSong(songModel.title),
-          mood: 'Local',
+          icon: classification.icon,
+          color: classification.color,
+          mood: classification.mood,
           lyrics: [],
           uri: songModel.uri,
           path: songModel.data,
@@ -129,27 +143,5 @@ class LocalMusicScannerService {
       print("Error scanning local music: $e");
       return [];
     }
-  }
-
-  /// Generate a consistent, aesthetic theme color based on the title string hash
-  Color _generateColorForSong(String title) {
-    final hash = title.hashCode;
-    final colors = [
-      Colors.orange,
-      Colors.brown,
-      Colors.amber,
-      Colors.redAccent,
-      Colors.red,
-      Colors.blueAccent,
-      Colors.green,
-      Colors.blueGrey,
-      Colors.deepPurple,
-      Colors.indigo,
-      Colors.pinkAccent,
-      Colors.teal,
-      Colors.cyan,
-      Colors.purpleAccent,
-    ];
-    return colors[hash.abs() % colors.length];
   }
 }

@@ -139,6 +139,9 @@ class AudioPlayerService {
 
   /// Toggle shuffle mode
   Future<void> toggleShuffle(bool enabled) async {
+    if (enabled) {
+      await _player.shuffle();
+    }
     await _player.setShuffleModeEnabled(enabled);
   }
 
